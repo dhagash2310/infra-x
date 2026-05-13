@@ -95,7 +95,13 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
-ignore = ["E501"]
+ignore = [
+    "E501",  # line length — formatter handles this; long error messages are fine
+    "B008",  # function call in default argument — REQUIRED by Typer for `x: T = typer.Option(...)`
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["infra_x"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

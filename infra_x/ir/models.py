@@ -30,7 +30,7 @@ Design notes
 from __future__ import annotations
 
 import re
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -215,7 +215,7 @@ class LocalBackend(BaseModel):
     path: str | None = None  # default: terraform.tfstate in module dir
 
 
-BackendConfig = Union[S3Backend, GCSBackend, TerraformCloudBackend, LocalBackend]
+BackendConfig = S3Backend | GCSBackend | TerraformCloudBackend | LocalBackend
 
 
 # --- Provider requirements --------------------------------------------------

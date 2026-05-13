@@ -14,7 +14,6 @@ contributors can author them without reading our codebase.
 
 from __future__ import annotations
 
-from importlib import resources
 from pathlib import Path
 from typing import Any
 

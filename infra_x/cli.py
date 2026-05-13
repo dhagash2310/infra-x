@@ -48,7 +48,7 @@ def list_cmd() -> None:
     table.add_column("Description")
     for b in bps:
         cost = (
-            f"${b.estimated_cost_usd_monthly[0]:g}–${b.estimated_cost_usd_monthly[1]:g}"
+            f"${b.estimated_cost_usd_monthly[0]:g}-${b.estimated_cost_usd_monthly[1]:g}"
             if b.estimated_cost_usd_monthly
             else "—"
         )
@@ -67,7 +67,7 @@ def show_cmd(blueprint_id: str = typer.Argument(..., help="Blueprint ID to show"
     console.print(f"  [magenta]Variables:[/magenta] {len(bp.variables)}")
     if bp.estimated_cost_usd_monthly:
         lo, hi = bp.estimated_cost_usd_monthly
-        console.print(f"  [magenta]Est. cost:[/magenta] ${lo:g}–${hi:g} / month")
+        console.print(f"  [magenta]Est. cost:[/magenta] ${lo:g}-${hi:g} / month")
     console.print()
     if bp.variables:
         t = Table(title="Variables")
@@ -215,7 +215,7 @@ def validate_cmd(blueprint_id: str | None = typer.Argument(None)) -> None:
 
             HCLRenderer(stack).files()
             console.print(f"  [green]✓[/green] {b.id}  ({len(b.services)} resources)")
-        except Exception as e:  # noqa: BLE001 — broad on purpose for CLI feedback
+        except Exception as e:  # broad on purpose for CLI feedback
             failed += 1
             console.print(f"  [red]✗[/red] {b.id}: {e}")
     if failed:

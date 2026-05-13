@@ -64,10 +64,14 @@ run-example:
 		--overwrite
 
 # Comprehensive pre-commit / pre-push gate. Runs:
+#  0. ruff lint (catches the same things CI catches)
 #  1. unit + snapshot tests
 #  2. blueprint validation (loader + IR + renderer round-trip)
 #  3. terraform validate against every blueprint, IF terraform is on PATH
 verify: dev
+	@echo ">> Layer 0: ruff lint"
+	$(VENV)/bin/ruff check .
+	@echo ""
 	@echo ">> Layer 1: pytest"
 	$(VENV)/bin/pytest -q
 	@echo ""

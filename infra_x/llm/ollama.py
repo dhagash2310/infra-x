@@ -5,7 +5,7 @@ Talks to a local `ollama serve` over its HTTP API. We use `/api/chat` (not the
 older `/api/generate`) so we can pass a system prompt cleanly and so we can
 toggle JSON mode via `format: "json"`.
 
-Defaults are tuned for an 8–16GB-RAM dev machine running `qwen2.5-coder:7b`.
+Defaults are tuned for an 8-16GB-RAM dev machine running `qwen2.5-coder:7b`.
 """
 
 from __future__ import annotations

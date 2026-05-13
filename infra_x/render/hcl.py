@@ -31,18 +31,6 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-# HCL bare identifier rules for object keys / arguments. Anything outside this
-# (dots, slashes, hyphens that lead, etc.) must be quoted, e.g.
-#   tags = { "kubernetes.io/role/elb" = "1" }
-_HCL_BARE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _format_key(key: str) -> str:
-    """Return an HCL-safe rendering of a map/object key (quoting if needed)."""
-    if _HCL_BARE_KEY.match(key):
-        return key
-    return _quote(key)
-
 from infra_x import __version__
 from infra_x.ir.models import (
     BackendConfig,
@@ -55,6 +43,18 @@ from infra_x.ir.models import (
     TerraformCloudBackend,
     Variable,
 )
+
+# HCL bare identifier rules for object keys / arguments. Anything outside this
+# (dots, slashes, hyphens that lead, etc.) must be quoted, e.g.
+#   tags = { "kubernetes.io/role/elb" = "1" }
+_HCL_BARE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _format_key(key: str) -> str:
+    """Return an HCL-safe rendering of a map/object key (quoting if needed)."""
+    if _HCL_BARE_KEY.match(key):
+        return key
+    return _quote(key)
 
 # --- value rendering ---------------------------------------------------------
 
