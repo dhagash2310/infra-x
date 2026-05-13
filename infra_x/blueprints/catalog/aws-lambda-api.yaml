@@ -1,0 +1,276 @@
+id: aws-lambda-api
+name: AWS Lambda Serverless API with DynamoDB
+description: Pay-per-use REST API on Lambda + API Gateway HTTP API, backed by a DynamoDB on-demand table.
+provider: aws
+region: us-east-1
+version: 0.1.0
+estimated_cost_usd_monthly: [5, 25]
+estimated_setup_minutes: [3, 4]
+tags: [api, serverless, aws, lambda, dynamodb]
+
+inputs:
+  - name: api_name
+    type: string
+    description: Short name for your API (used as a prefix for all resources)
+    required: true
+    examples: [todos, orders, contacts]
+  - name: environment
+    type: string
+    default: prod
+
+variables:
+  - name: api_name
+    type: string
+    description: Short name for your API (also a resource prefix)
+    validations:
+      - condition: 'can(regex("^[a-z][a-z0-9-]{1,30}[a-z0-9]$", var.api_name))'
+        error_message: api_name must be 3-32 chars, lowercase letters/digits/hyphens.
+  - name: environment
+    type: string
+    default: prod
+    validations:
+      - condition: 'contains(["dev", "staging", "prod"], var.environment)'
+        error_message: environment must be one of dev, staging, prod.
+  - name: aws_region
+    type: string
+    default: us-east-1
+    validations:
+      - condition: 'can(regex("^[a-z]{2}-[a-z]+-[0-9]+$", var.aws_region))'
+        error_message: aws_region must look like an AWS region (e.g. us-east-1).
+  - name: lambda_memory_mb
+    type: number
+    description: Lambda memory in MB (also scales CPU proportionally)
+    default: 512
+    validations:
+      - condition: 'var.lambda_memory_mb >= 128 && var.lambda_memory_mb <= 10240'
+        error_message: lambda_memory_mb must be between 128 and 10240 (AWS Lambda limit).
+  - name: lambda_timeout_seconds
+    type: number
+    default: 10
+    validations:
+      - condition: 'var.lambda_timeout_seconds >= 1 && var.lambda_timeout_seconds <= 900'
+        error_message: lambda_timeout_seconds must be between 1 and 900 (AWS Lambda limit).
+
+services:
+  - id: api_table
+    type: aws_dynamodb_table
+    category: database
+    display_name: DynamoDB table
+    icon: dynamodb
+    config:
+      name: ${var.api_name}-${var.environment}
+      billing_mode: PAY_PER_REQUEST
+      hash_key: pk
+      range_key: sk
+      attribute:
+        _blocks:
+          - name: pk
+            type: S
+          - name: sk
+            type: S
+      point_in_time_recovery:
+        _block:
+          enabled: true
+      server_side_encryption:
+        _block:
+          enabled: true
+      tags:
+        Name: ${var.api_name}-${var.environment}
+        Environment: ${var.environment}
+        ManagedBy: infra-x
+
+  - id: lambda_role
+    type: aws_iam_role
+    category: iam
+    display_name: Lambda execution role
+    config:
+      name: ${var.api_name}-${var.environment}-exec
+      assume_role_policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": "lambda.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }]
+        }
+
+  - id: lambda_basic_exec
+    type: aws_iam_role_policy_attachment
+    category: iam
+    config:
+      role: ${aws_iam_role.lambda_role.name}
+      policy_arn: arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  - id: lambda_dynamodb_policy
+    type: aws_iam_role_policy
+    category: iam
+    config:
+      name: ${var.api_name}-dynamodb-rw
+      role: ${aws_iam_role.lambda_role.id}
+      policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:PutItem",
+              "dynamodb:UpdateItem",
+              "dynamodb:DeleteItem",
+              "dynamodb:Query",
+              "dynamodb:Scan"
+            ],
+            "Resource": "${aws_dynamodb_table.api_table.arn}"
+          }]
+        }
+
+  - id: api_handler_zip
+    type: archive_file
+    kind: data
+    category: compute
+    config:
+      type: zip
+      source_dir: ${path.module}/lambda_src
+      output_path: ${path.module}/lambda_src.zip
+
+  - id: api_handler
+    type: aws_lambda_function
+    category: compute
+    display_name: API handler
+    icon: lambda
+    config:
+      function_name: ${var.api_name}-${var.environment}
+      role: ${aws_iam_role.lambda_role.arn}
+      handler: index.handler
+      runtime: nodejs20.x
+      memory_size: ${var.lambda_memory_mb}
+      timeout: ${var.lambda_timeout_seconds}
+      filename: ${data.archive_file.api_handler_zip.output_path}
+      source_code_hash: ${data.archive_file.api_handler_zip.output_base64sha256}
+      environment:
+        _block:
+          variables:
+            TABLE_NAME: ${aws_dynamodb_table.api_table.name}
+            LOG_LEVEL: info
+      tracing_config:
+        _block:
+          mode: Active
+
+  - id: api_log_group
+    type: aws_cloudwatch_log_group
+    category: observability
+    config:
+      name: /aws/lambda/${aws_lambda_function.api_handler.function_name}
+      retention_in_days: 14
+
+  - id: api_gateway
+    type: aws_apigatewayv2_api
+    category: networking
+    display_name: HTTP API Gateway
+    icon: apigateway
+    config:
+      name: ${var.api_name}-${var.environment}
+      protocol_type: HTTP
+      cors_configuration:
+        _block:
+          allow_origins: ["*"]
+          allow_methods: [GET, POST, PUT, DELETE, OPTIONS]
+          allow_headers: ["content-type", "authorization"]
+
+  - id: api_integration
+    type: aws_apigatewayv2_integration
+    category: networking
+    config:
+      api_id: ${aws_apigatewayv2_api.api_gateway.id}
+      integration_type: AWS_PROXY
+      integration_uri: ${aws_lambda_function.api_handler.invoke_arn}
+      payload_format_version: "2.0"
+
+  - id: api_default_route
+    type: aws_apigatewayv2_route
+    category: networking
+    config:
+      api_id: ${aws_apigatewayv2_api.api_gateway.id}
+      route_key: $default
+      target: integrations/${aws_apigatewayv2_integration.api_integration.id}
+
+  - id: api_default_stage
+    type: aws_apigatewayv2_stage
+    category: networking
+    config:
+      api_id: ${aws_apigatewayv2_api.api_gateway.id}
+      name: $default
+      auto_deploy: true
+
+  - id: api_lambda_permission
+    type: aws_lambda_permission
+    category: security
+    config:
+      statement_id: AllowAPIGatewayInvoke
+      action: lambda:InvokeFunction
+      function_name: ${aws_lambda_function.api_handler.function_name}
+      principal: apigateway.amazonaws.com
+      source_arn: ${aws_apigatewayv2_api.api_gateway.execution_arn}/*/*
+
+connections:
+  - from: api_gateway
+    to: api_handler
+    kind: invokes
+  - from: api_handler
+    to: api_table
+    kind: reads
+  - from: api_handler
+    to: api_table
+    kind: writes
+
+outputs:
+  - name: api_url
+    value: aws_apigatewayv2_api.api_gateway.api_endpoint
+    description: Public HTTPS endpoint for the API
+  - name: table_name
+    value: aws_dynamodb_table.api_table.name
+    description: DynamoDB table name (also injected as TABLE_NAME env var)
+  - name: lambda_log_group
+    value: aws_cloudwatch_log_group.api_log_group.name
+    description: CloudWatch log group for the Lambda
+
+extra_providers:
+  - local_name: archive
+    source: hashicorp/archive
+    version: "~> 2.4"
+
+# A placeholder Lambda handler so `terraform plan` succeeds out of the box.
+# Replace lambda_src/index.js with your real code; the data.archive_file block
+# will pick it up on the next plan.
+companion_files:
+  lambda_src/index.js: |
+    // infra-x placeholder Lambda — replace with your real handler.
+    exports.handler = async (event) => {
+      console.log("event:", JSON.stringify(event));
+      return {
+        statusCode: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          message: "Hello from infra-x!",
+          path: event.rawPath || "/",
+          tableName: process.env.TABLE_NAME,
+        }),
+      };
+    };
+
+agent_guidance: |
+  This blueprint is self-contained: a placeholder Lambda handler ships in
+  `lambda_src/index.js`. Users replace it with their real code; the
+  `data.archive_file` block re-zips on every `terraform plan`.
+
+  Customizations to consider:
+  - If the user mentions Python or Go, change `runtime` to `python3.12` /
+    `provided.al2023`, update `handler` accordingly, and rewrite the
+    `companion_files["lambda_src/index.js"]` placeholder to match the runtime
+    (e.g. `lambda_src/main.py` with `def handler(event, context): ...`).
+  - If the user wants auth, add a JWT authorizer on the API Gateway.
+  - If the user wants a custom domain, add `aws_apigatewayv2_domain_name` and
+    `aws_apigatewayv2_api_mapping` plus an ACM cert in the same region.
+  - If the user mentions queues / async, add SQS + an event source mapping.
+  - Do NOT remove the LOG_LEVEL env var or the X-Ray tracing block.

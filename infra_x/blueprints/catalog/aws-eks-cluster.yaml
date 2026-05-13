@@ -1,0 +1,250 @@
+id: aws-eks-cluster
+name: AWS EKS Cluster (minimal)
+description: Bare-bones EKS cluster with one managed node group across 2 AZs. Intentionally minimal — bring your own VPC if you need more.
+provider: aws
+region: us-east-1
+version: 0.1.0
+estimated_cost_usd_monthly: [80, 200]
+estimated_setup_minutes: [10, 15]
+tags: [kubernetes, eks, aws]
+
+inputs:
+  - name: cluster_name
+    type: string
+    required: true
+    examples: [platform-prod, ml-staging]
+  - name: kubernetes_version
+    type: string
+    default: "1.30"
+
+variables:
+  - name: cluster_name
+    type: string
+    validations:
+      - condition: 'can(regex("^[a-zA-Z][a-zA-Z0-9-]{0,99}$", var.cluster_name))'
+        error_message: cluster_name must be 1-100 chars, start with a letter, alphanumeric + hyphens only (EKS naming rules).
+  - name: aws_region
+    type: string
+    default: us-east-1
+    validations:
+      - condition: 'can(regex("^[a-z]{2}-[a-z]+-[0-9]+$", var.aws_region))'
+        error_message: aws_region must look like an AWS region (e.g. us-east-1).
+  - name: kubernetes_version
+    type: string
+    default: "1.30"
+    validations:
+      - condition: 'can(regex("^1\\.(2[5-9]|3[0-9])$", var.kubernetes_version))'
+        error_message: kubernetes_version must be a supported EKS version like "1.29", "1.30", "1.31".
+  - name: node_instance_type
+    type: string
+    default: t3.medium
+  # NOTE: Terraform <1.9 forbids cross-variable references inside a
+  # `validation` block, so we keep each check self-contained and rely on EKS
+  # to reject impossible min/desired/max combinations at apply-time.
+  - name: node_desired_size
+    type: number
+    default: 2
+    validations:
+      - condition: 'var.node_desired_size >= 1 && var.node_desired_size <= 1000'
+        error_message: node_desired_size must be between 1 and 1000.
+  - name: node_min_size
+    type: number
+    default: 1
+    validations:
+      - condition: 'var.node_min_size >= 1'
+        error_message: node_min_size must be >= 1 (EKS managed node groups require at least 1 node).
+  - name: node_max_size
+    type: number
+    default: 4
+    validations:
+      - condition: 'var.node_max_size >= 1 && var.node_max_size <= 1000'
+        error_message: node_max_size must be between 1 and 1000.
+
+services:
+  - id: vpc
+    type: aws_vpc
+    category: networking
+    config:
+      cidr_block: 10.10.0.0/16
+      enable_dns_hostnames: true
+      enable_dns_support: true
+      tags:
+        Name: ${var.cluster_name}-vpc
+        ManagedBy: infra-x
+
+  - id: igw
+    type: aws_internet_gateway
+    category: networking
+    config:
+      vpc_id: ${aws_vpc.vpc.id}
+
+  - id: subnet_a
+    type: aws_subnet
+    category: networking
+    config:
+      vpc_id: ${aws_vpc.vpc.id}
+      cidr_block: 10.10.1.0/24
+      availability_zone: ${var.aws_region}a
+      map_public_ip_on_launch: true
+      tags:
+        Name: ${var.cluster_name}-subnet-a
+        "kubernetes.io/role/elb": "1"
+
+  - id: subnet_b
+    type: aws_subnet
+    category: networking
+    config:
+      vpc_id: ${aws_vpc.vpc.id}
+      cidr_block: 10.10.2.0/24
+      availability_zone: ${var.aws_region}b
+      map_public_ip_on_launch: true
+      tags:
+        Name: ${var.cluster_name}-subnet-b
+        "kubernetes.io/role/elb": "1"
+
+  - id: rt
+    type: aws_route_table
+    category: networking
+    config:
+      vpc_id: ${aws_vpc.vpc.id}
+      route:
+        _block:
+          cidr_block: 0.0.0.0/0
+          gateway_id: ${aws_internet_gateway.igw.id}
+
+  - id: rt_assoc_a
+    type: aws_route_table_association
+    category: networking
+    config:
+      subnet_id: ${aws_subnet.subnet_a.id}
+      route_table_id: ${aws_route_table.rt.id}
+
+  - id: rt_assoc_b
+    type: aws_route_table_association
+    category: networking
+    config:
+      subnet_id: ${aws_subnet.subnet_b.id}
+      route_table_id: ${aws_route_table.rt.id}
+
+  - id: cluster_role
+    type: aws_iam_role
+    category: iam
+    config:
+      name: ${var.cluster_name}-cluster-role
+      assume_role_policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": "eks.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }]
+        }
+
+  - id: cluster_role_attach
+    type: aws_iam_role_policy_attachment
+    category: iam
+    config:
+      role: ${aws_iam_role.cluster_role.name}
+      policy_arn: arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  - id: node_role
+    type: aws_iam_role
+    category: iam
+    config:
+      name: ${var.cluster_name}-node-role
+      assume_role_policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": "ec2.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }]
+        }
+
+  - id: node_worker_attach
+    type: aws_iam_role_policy_attachment
+    category: iam
+    config:
+      role: ${aws_iam_role.node_role.name}
+      policy_arn: arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+
+  - id: node_cni_attach
+    type: aws_iam_role_policy_attachment
+    category: iam
+    config:
+      role: ${aws_iam_role.node_role.name}
+      policy_arn: arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+  - id: node_ecr_attach
+    type: aws_iam_role_policy_attachment
+    category: iam
+    config:
+      role: ${aws_iam_role.node_role.name}
+      policy_arn: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  - id: cluster
+    type: aws_eks_cluster
+    category: compute
+    display_name: EKS Cluster
+    icon: eks
+    config:
+      name: ${var.cluster_name}
+      role_arn: ${aws_iam_role.cluster_role.arn}
+      version: ${var.kubernetes_version}
+      vpc_config:
+        _block:
+          subnet_ids: ["${aws_subnet.subnet_a.id}", "${aws_subnet.subnet_b.id}"]
+          endpoint_public_access: true
+          endpoint_private_access: true
+
+  - id: nodegroup
+    type: aws_eks_node_group
+    category: compute
+    display_name: Managed Node Group
+    config:
+      cluster_name: ${aws_eks_cluster.cluster.name}
+      node_group_name: ${var.cluster_name}-default
+      node_role_arn: ${aws_iam_role.node_role.arn}
+      subnet_ids: ["${aws_subnet.subnet_a.id}", "${aws_subnet.subnet_b.id}"]
+      instance_types: ["${var.node_instance_type}"]
+      scaling_config:
+        _block:
+          desired_size: ${var.node_desired_size}
+          min_size: ${var.node_min_size}
+          max_size: ${var.node_max_size}
+      update_config:
+        _block:
+          max_unavailable: 1
+
+connections:
+  - from: cluster
+    to: vpc
+    kind: depends_on
+  - from: nodegroup
+    to: cluster
+    kind: depends_on
+
+outputs:
+  - name: cluster_endpoint
+    value: aws_eks_cluster.cluster.endpoint
+  - name: cluster_ca
+    value: aws_eks_cluster.cluster.certificate_authority[0].data
+    sensitive: true
+  - name: kubectl_config_command
+    value: "\"aws eks update-kubeconfig --region ${var.aws_region} --name ${var.cluster_name}\""
+    description: Run this locally to point kubectl at the new cluster
+
+agent_guidance: |
+  This blueprint is intentionally minimal — single managed node group, public
+  endpoint, no add-ons. When customizing:
+
+  - If the user mentions GPU / ML: change instance_types to a g5/g6 family and
+    install the NVIDIA device plugin via a kubernetes_manifest resource.
+  - If the user mentions private / hardened: set endpoint_public_access=false,
+    add private subnets + NAT, and warn about ~$32/mo NAT cost per AZ.
+  - If the user mentions autoscaler: install the cluster-autoscaler Helm chart
+    and add `tag:k8s.io/cluster-autoscaler/${cluster_name}=owned` on subnets.
+  - Always create dedicated cluster_role and node_role; never reuse account
+    admin roles.

@@ -1,0 +1,147 @@
+id: gcp-cloud-run
+name: GCP Cloud Run Containerized App
+description: Serverless containerized HTTP service on Cloud Run with an Artifact Registry repo for the image.
+provider: gcp
+region: us-central1
+version: 0.1.0
+estimated_cost_usd_monthly: [10, 30]
+estimated_setup_minutes: [2, 3]
+tags: [container, serverless, gcp, cloud-run]
+
+inputs:
+  - name: service_name
+    type: string
+    description: Cloud Run service name
+    required: true
+    examples: [api-server, web-app]
+  - name: project_id
+    type: string
+    description: GCP project ID
+    required: true
+
+variables:
+  - name: project_id
+    type: string
+    description: GCP project ID
+    validations:
+      - condition: 'can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.project_id))'
+        error_message: project_id must be 6-30 chars, lowercase letters/digits/hyphens (GCP project ID rules).
+  - name: service_name
+    type: string
+    description: Cloud Run service name
+    validations:
+      - condition: 'can(regex("^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$", var.service_name))'
+        error_message: service_name must be 1-49 chars, lowercase letters/digits/hyphens, start with a letter (Cloud Run rules).
+  - name: region
+    type: string
+    default: us-central1
+  - name: container_image
+    type: string
+    description: Container image URI (placeholder until first build)
+    default: us-docker.pkg.dev/cloudrun/container/hello
+  - name: min_instances
+    type: number
+    default: 0
+    # NOTE: we don't enforce `min_instances <= max_instances` here because
+    # Terraform <1.9 forbids cross-variable references inside a `validation`
+    # block. Cloud Run will reject the apply if the relationship is wrong.
+    validations:
+      - condition: 'var.min_instances >= 0 && var.min_instances <= 1000'
+        error_message: min_instances must be between 0 and 1000.
+  - name: max_instances
+    type: number
+    default: 5
+    validations:
+      - condition: 'var.max_instances >= 1 && var.max_instances <= 1000'
+        error_message: max_instances must be between 1 and 1000.
+
+services:
+  - id: artifact_repo
+    type: google_artifact_registry_repository
+    category: storage
+    display_name: Artifact Registry
+    icon: artifact-registry
+    config:
+      location: ${var.region}
+      repository_id: ${var.service_name}
+      description: Container images for ${var.service_name}
+      format: DOCKER
+      labels:
+        managed_by: infra-x
+
+  - id: run_sa
+    type: google_service_account
+    category: iam
+    display_name: Cloud Run service account
+    config:
+      account_id: ${var.service_name}-run
+      display_name: Service account for ${var.service_name} Cloud Run service
+
+  - id: run_service
+    type: google_cloud_run_v2_service
+    category: compute
+    display_name: Cloud Run service
+    icon: cloud-run
+    config:
+      name: ${var.service_name}
+      location: ${var.region}
+      ingress: INGRESS_TRAFFIC_ALL
+      template:
+        _block:
+          service_account: ${google_service_account.run_sa.email}
+          scaling:
+            _block:
+              min_instance_count: ${var.min_instances}
+              max_instance_count: ${var.max_instances}
+          containers:
+            _block:
+              image: ${var.container_image}
+              ports:
+                _block:
+                  container_port: 8080
+              resources:
+                _block:
+                  limits:
+                    cpu: "1"
+                    memory: 512Mi
+                  cpu_idle: true
+              env:
+                _blocks:
+                  - name: PORT
+                    value: "8080"
+
+  - id: run_invoker_public
+    type: google_cloud_run_v2_service_iam_member
+    category: iam
+    config:
+      project: ${var.project_id}
+      location: ${google_cloud_run_v2_service.run_service.location}
+      name: ${google_cloud_run_v2_service.run_service.name}
+      role: roles/run.invoker
+      member: allUsers
+
+connections:
+  - from: run_service
+    to: artifact_repo
+    kind: reads
+    label: pulls image from
+  - from: run_service
+    to: run_sa
+    kind: depends_on
+
+outputs:
+  - name: service_url
+    value: google_cloud_run_v2_service.run_service.uri
+    description: Public HTTPS URL of the Cloud Run service
+  - name: artifact_repo_url
+    value: ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.artifact_repo.repository_id}
+    description: Push your container images to this registry path
+
+agent_guidance: |
+  Customizations to consider:
+  - If the user mentions internal-only / VPC, change `ingress` to
+    INGRESS_TRAFFIC_INTERNAL_ONLY and remove the `roles/run.invoker = allUsers`.
+  - If the user mentions custom domain, add `google_cloud_run_domain_mapping`.
+  - If the user mentions a database, suggest Cloud SQL with Private Service
+    Access; do NOT expose Cloud SQL on a public IP.
+  - Always keep the dedicated service account; never use the default compute SA.

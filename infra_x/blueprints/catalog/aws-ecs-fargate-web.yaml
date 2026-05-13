@@ -1,0 +1,334 @@
+id: aws-ecs-fargate-web
+name: AWS ECS Fargate Web App
+description: Container web app on ECS Fargate behind an Application Load Balancer in a 2-AZ VPC. Minimal but production-shaped.
+provider: aws
+region: us-east-1
+version: 0.1.0
+estimated_cost_usd_monthly: [30, 80]
+estimated_setup_minutes: [4, 6]
+tags: [container, fargate, ecs, alb, aws]
+
+inputs:
+  - name: app_name
+    type: string
+    description: Short name for your app (used as a prefix for all resources)
+    required: true
+    examples: [storefront, dashboard]
+  - name: container_image
+    type: string
+    description: Container image URI to deploy
+    required: false
+    default: public.ecr.aws/nginx/nginx:latest
+  - name: container_port
+    type: string
+    default: "80"
+
+variables:
+  - name: app_name
+    type: string
+    validations:
+      - condition: 'can(regex("^[a-z][a-z0-9-]{1,30}[a-z0-9]$", var.app_name))'
+        error_message: app_name must be 3-32 chars, lowercase letters/digits/hyphens.
+  - name: aws_region
+    type: string
+    default: us-east-1
+    validations:
+      - condition: 'can(regex("^[a-z]{2}-[a-z]+-[0-9]+$", var.aws_region))'
+        error_message: aws_region must look like an AWS region (e.g. us-east-1).
+  - name: container_image
+    type: string
+    default: public.ecr.aws/nginx/nginx:latest
+  - name: container_port
+    type: number
+    default: 80
+    validations:
+      - condition: 'var.container_port >= 1 && var.container_port <= 65535'
+        error_message: container_port must be between 1 and 65535.
+  - name: desired_count
+    type: number
+    default: 2
+    validations:
+      - condition: 'var.desired_count >= 1'
+        error_message: desired_count must be >= 1.
+  - name: cpu
+    type: number
+    default: 512
+    validations:
+      - condition: 'contains([256, 512, 1024, 2048, 4096, 8192, 16384], var.cpu)'
+        error_message: cpu must be one of 256, 512, 1024, 2048, 4096, 8192, 16384 (Fargate-supported values).
+  - name: memory
+    type: number
+    default: 1024
+    validations:
+      - condition: 'var.memory >= 512 && var.memory <= 122880'
+        error_message: memory must be between 512 and 122880 MB (Fargate range). See AWS docs for valid CPU/memory combinations.
+
+services:
+  - id: vpc
+    type: aws_vpc
+    category: networking
+    display_name: VPC
+    config:
+      cidr_block: 10.0.0.0/16
+      enable_dns_hostnames: true
+      enable_dns_support: true
+      tags:
+        Name: ${var.app_name}-vpc
+        ManagedBy: infra-x
+
+  - id: igw
+    type: aws_internet_gateway
+    category: networking
+    config:
+      vpc_id: ${aws_vpc.vpc.id}
+      tags:
+        Name: ${var.app_name}-igw
+
+  - id: public_subnet_a
+    type: aws_subnet
+    category: networking
+    config:
+      vpc_id: ${aws_vpc.vpc.id}
+      cidr_block: 10.0.1.0/24
+      availability_zone: ${var.aws_region}a
+      map_public_ip_on_launch: true
+      tags:
+        Name: ${var.app_name}-public-a
+
+  - id: public_subnet_b
+    type: aws_subnet
+    category: networking
+    config:
+      vpc_id: ${aws_vpc.vpc.id}
+      cidr_block: 10.0.2.0/24
+      availability_zone: ${var.aws_region}b
+      map_public_ip_on_launch: true
+      tags:
+        Name: ${var.app_name}-public-b
+
+  - id: public_rt
+    type: aws_route_table
+    category: networking
+    config:
+      vpc_id: ${aws_vpc.vpc.id}
+      route:
+        _block:
+          cidr_block: 0.0.0.0/0
+          gateway_id: ${aws_internet_gateway.igw.id}
+      tags:
+        Name: ${var.app_name}-public-rt
+
+  - id: public_rt_assoc_a
+    type: aws_route_table_association
+    category: networking
+    config:
+      subnet_id: ${aws_subnet.public_subnet_a.id}
+      route_table_id: ${aws_route_table.public_rt.id}
+
+  - id: public_rt_assoc_b
+    type: aws_route_table_association
+    category: networking
+    config:
+      subnet_id: ${aws_subnet.public_subnet_b.id}
+      route_table_id: ${aws_route_table.public_rt.id}
+
+  - id: alb_sg
+    type: aws_security_group
+    category: security
+    config:
+      name: ${var.app_name}-alb-sg
+      vpc_id: ${aws_vpc.vpc.id}
+      ingress:
+        _block:
+          from_port: 80
+          to_port: 80
+          protocol: tcp
+          cidr_blocks: ["0.0.0.0/0"]
+      egress:
+        _block:
+          from_port: 0
+          to_port: 0
+          protocol: "-1"
+          cidr_blocks: ["0.0.0.0/0"]
+
+  - id: task_sg
+    type: aws_security_group
+    category: security
+    config:
+      name: ${var.app_name}-task-sg
+      vpc_id: ${aws_vpc.vpc.id}
+      ingress:
+        _block:
+          from_port: ${var.container_port}
+          to_port: ${var.container_port}
+          protocol: tcp
+          security_groups: ["${aws_security_group.alb_sg.id}"]
+      egress:
+        _block:
+          from_port: 0
+          to_port: 0
+          protocol: "-1"
+          cidr_blocks: ["0.0.0.0/0"]
+
+  - id: alb
+    type: aws_lb
+    category: networking
+    display_name: Application Load Balancer
+    icon: alb
+    config:
+      name: ${var.app_name}-alb
+      load_balancer_type: application
+      security_groups: ["${aws_security_group.alb_sg.id}"]
+      subnets: ["${aws_subnet.public_subnet_a.id}", "${aws_subnet.public_subnet_b.id}"]
+
+  - id: tg
+    type: aws_lb_target_group
+    category: networking
+    config:
+      name: ${var.app_name}-tg
+      port: ${var.container_port}
+      protocol: HTTP
+      vpc_id: ${aws_vpc.vpc.id}
+      target_type: ip
+      health_check:
+        _block:
+          path: /
+          matcher: 200-399
+          interval: 30
+          timeout: 5
+          healthy_threshold: 2
+          unhealthy_threshold: 3
+
+  - id: alb_listener
+    type: aws_lb_listener
+    category: networking
+    config:
+      load_balancer_arn: ${aws_lb.alb.arn}
+      port: 80
+      protocol: HTTP
+      default_action:
+        _block:
+          type: forward
+          target_group_arn: ${aws_lb_target_group.tg.arn}
+
+  - id: cluster
+    type: aws_ecs_cluster
+    category: compute
+    display_name: ECS Cluster
+    icon: ecs
+    config:
+      name: ${var.app_name}-cluster
+      setting:
+        _block:
+          name: containerInsights
+          value: enabled
+
+  - id: task_exec_role
+    type: aws_iam_role
+    category: iam
+    config:
+      name: ${var.app_name}-task-exec
+      assume_role_policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": "ecs-tasks.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }]
+        }
+
+  - id: task_exec_attach
+    type: aws_iam_role_policy_attachment
+    category: iam
+    config:
+      role: ${aws_iam_role.task_exec_role.name}
+      policy_arn: arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  - id: task
+    type: aws_ecs_task_definition
+    category: compute
+    config:
+      family: ${var.app_name}
+      network_mode: awsvpc
+      requires_compatibilities: [FARGATE]
+      cpu: ${var.cpu}
+      memory: ${var.memory}
+      execution_role_arn: ${aws_iam_role.task_exec_role.arn}
+      container_definitions: |-
+        ${jsonencode([{
+          name      = var.app_name
+          image     = var.container_image
+          essential = true
+          portMappings = [{
+            containerPort = var.container_port
+            protocol      = "tcp"
+          }]
+          logConfiguration = {
+            logDriver = "awslogs"
+            options = {
+              "awslogs-group"         = aws_cloudwatch_log_group.task_logs.name
+              "awslogs-region"        = var.aws_region
+              "awslogs-stream-prefix" = "ecs"
+            }
+          }
+        }])}
+
+  - id: task_logs
+    type: aws_cloudwatch_log_group
+    category: observability
+    config:
+      name: /ecs/${var.app_name}
+      retention_in_days: 14
+
+  - id: service
+    type: aws_ecs_service
+    category: compute
+    display_name: ECS Service
+    config:
+      name: ${var.app_name}
+      cluster: ${aws_ecs_cluster.cluster.id}
+      task_definition: ${aws_ecs_task_definition.task.arn}
+      desired_count: ${var.desired_count}
+      launch_type: FARGATE
+      network_configuration:
+        _block:
+          subnets: ["${aws_subnet.public_subnet_a.id}", "${aws_subnet.public_subnet_b.id}"]
+          security_groups: ["${aws_security_group.task_sg.id}"]
+          assign_public_ip: true
+      load_balancer:
+        _block:
+          target_group_arn: ${aws_lb_target_group.tg.arn}
+          container_name: ${var.app_name}
+          container_port: ${var.container_port}
+
+connections:
+  - from: alb
+    to: service
+    kind: serves
+  - from: service
+    to: cluster
+    kind: depends_on
+  - from: service
+    to: task
+    kind: depends_on
+
+outputs:
+  - name: alb_dns_name
+    value: aws_lb.alb.dns_name
+    description: ALB DNS name (point your CNAME here)
+  - name: cluster_name
+    value: aws_ecs_cluster.cluster.name
+
+agent_guidance: |
+  This blueprint is intentionally minimal: 2 public subnets, no NAT, ALB on
+  port 80. It's "production-shaped" — not "production-hardened". When customizing:
+
+  - If user mentions HTTPS/TLS: add ACM cert + a port-443 listener and redirect
+    the port-80 listener to 443.
+  - If user mentions database/private services: split subnets into public+private,
+    add NAT gateways (warn about ~$32/mo each), and put tasks in private subnets.
+  - If user mentions autoscaling: add aws_appautoscaling_target +
+    aws_appautoscaling_policy on CPU/memory.
+  - The container_definitions JSON uses raw HCL `jsonencode`, which is the
+    idiomatic ECS pattern. Don't try to express it as a YAML dict.

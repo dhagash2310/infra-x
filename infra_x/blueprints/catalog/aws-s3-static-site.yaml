@@ -1,0 +1,194 @@
+id: aws-s3-static-site
+name: AWS S3 Static Website with CloudFront
+description: Fast, global static website with automatic HTTPS via CloudFront and an S3 origin (private bucket served through OAC).
+provider: aws
+region: us-east-1
+version: 0.1.0
+estimated_cost_usd_monthly: [1, 10]
+estimated_setup_minutes: [2, 3]
+tags: [website, static, aws, cloudfront, s3]
+
+inputs:
+  - name: site_name
+    type: string
+    description: A globally unique name for the site (becomes the S3 bucket name)
+    required: true
+    examples: [acme-marketing-site, my-blog-2026]
+  - name: environment
+    type: string
+    description: Environment label (dev, staging, prod)
+    required: false
+    default: prod
+
+variables:
+  - name: site_name
+    type: string
+    description: Globally unique S3 bucket name for the site
+    validations:
+      - condition: 'can(regex("^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$", var.site_name))'
+        error_message: site_name must be 3-63 chars, lowercase letters/digits/hyphens, and start+end with a letter or digit (S3 bucket naming rules).
+  - name: environment
+    type: string
+    description: Environment label
+    default: prod
+    validations:
+      - condition: 'contains(["dev", "staging", "prod"], var.environment)'
+        error_message: environment must be one of dev, staging, prod.
+  - name: aws_region
+    type: string
+    description: AWS region for the bucket
+    default: us-east-1
+    validations:
+      - condition: 'can(regex("^[a-z]{2}-[a-z]+-[0-9]+$", var.aws_region))'
+        error_message: aws_region must look like an AWS region (e.g. us-east-1, eu-west-2).
+
+services:
+  - id: site_bucket
+    type: aws_s3_bucket
+    category: storage
+    display_name: Site bucket
+    icon: s3
+    config:
+      bucket: ${var.site_name}
+      tags:
+        Name: ${var.site_name}
+        Environment: ${var.environment}
+        ManagedBy: infra-x
+
+  - id: site_bucket_public_access
+    type: aws_s3_bucket_public_access_block
+    category: security
+    config:
+      bucket: ${aws_s3_bucket.site_bucket.id}
+      block_public_acls: true
+      block_public_policy: true
+      ignore_public_acls: true
+      restrict_public_buckets: true
+
+  - id: site_bucket_ownership
+    type: aws_s3_bucket_ownership_controls
+    category: security
+    config:
+      bucket: ${aws_s3_bucket.site_bucket.id}
+      rule:
+        _block:
+          object_ownership: BucketOwnerEnforced
+
+  - id: site_bucket_encryption
+    type: aws_s3_bucket_server_side_encryption_configuration
+    category: security
+    config:
+      bucket: ${aws_s3_bucket.site_bucket.id}
+      rule:
+        _block:
+          apply_server_side_encryption_by_default:
+            _block:
+              sse_algorithm: AES256
+
+  - id: site_oac
+    type: aws_cloudfront_origin_access_control
+    category: security
+    display_name: Origin Access Control
+    config:
+      name: ${var.site_name}-oac
+      description: OAC for ${var.site_name} static site
+      origin_access_control_origin_type: s3
+      signing_behavior: always
+      signing_protocol: sigv4
+
+  - id: cdn
+    type: aws_cloudfront_distribution
+    category: cdn
+    display_name: CloudFront CDN
+    icon: cloudfront
+    config:
+      enabled: true
+      is_ipv6_enabled: true
+      default_root_object: index.html
+      price_class: PriceClass_100
+      origin:
+        _block:
+          domain_name: ${aws_s3_bucket.site_bucket.bucket_regional_domain_name}
+          origin_id: ${var.site_name}-s3-origin
+          origin_access_control_id: ${aws_cloudfront_origin_access_control.site_oac.id}
+      default_cache_behavior:
+        _block:
+          allowed_methods: [GET, HEAD]
+          cached_methods: [GET, HEAD]
+          target_origin_id: ${var.site_name}-s3-origin
+          viewer_protocol_policy: redirect-to-https
+          compress: true
+          forwarded_values:
+            _block:
+              query_string: false
+              cookies:
+                _block:
+                  forward: none
+      restrictions:
+        _block:
+          geo_restriction:
+            _block:
+              restriction_type: none
+      viewer_certificate:
+        _block:
+          cloudfront_default_certificate: true
+      tags:
+        Name: ${var.site_name}-cdn
+        Environment: ${var.environment}
+        ManagedBy: infra-x
+
+  - id: site_bucket_policy
+    type: aws_s3_bucket_policy
+    category: security
+    config:
+      bucket: ${aws_s3_bucket.site_bucket.id}
+      policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Sid": "AllowCloudFrontReadOnly",
+            "Effect": "Allow",
+            "Principal": { "Service": "cloudfront.amazonaws.com" },
+            "Action": "s3:GetObject",
+            "Resource": "${aws_s3_bucket.site_bucket.arn}/*",
+            "Condition": {
+              "StringEquals": {
+                "AWS:SourceArn": "${aws_cloudfront_distribution.cdn.arn}"
+              }
+            }
+          }]
+        }
+
+connections:
+  - from: cdn
+    to: site_bucket
+    kind: serves
+    label: serves objects from
+  - from: site_bucket_policy
+    to: site_bucket
+    kind: depends_on
+  - from: site_bucket_public_access
+    to: site_bucket
+    kind: depends_on
+  - from: site_bucket_encryption
+    to: site_bucket
+    kind: depends_on
+
+outputs:
+  - name: cloudfront_domain_name
+    value: aws_cloudfront_distribution.cdn.domain_name
+    description: The CloudFront distribution URL (use this as your CNAME target)
+  - name: bucket_name
+    value: aws_s3_bucket.site_bucket.id
+    description: The S3 bucket name where you upload your site files
+
+agent_guidance: |
+  Customizations to consider:
+  - If the user mentions a custom domain, add `aws_route53_record` and request an
+    `aws_acm_certificate` in us-east-1 (CloudFront requires us-east-1 ACM certs).
+  - If the user mentions logging or analytics, enable CloudFront access logs to
+    a separate `${var.site_name}-logs` bucket with a 30-day lifecycle rule.
+  - If the user mentions an SPA / client-side routing, add a custom error response
+    that maps 403/404 to /index.html with status 200.
+  - Never make the S3 bucket public. Always serve through the OAC + bucket policy.
+  - Always keep `block_public_*` flags true.
