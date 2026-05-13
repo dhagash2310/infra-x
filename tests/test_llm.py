@@ -103,20 +103,22 @@ def test_anthropic_json_mode_prefills_and_parses():
 
 
 def test_anthropic_missing_api_key_raises_helpful_error():
+    # Construct with explicit None and then clear the post-init env-var fallback
+    # so the test doesn't depend on whether ANTHROPIC_API_KEY is set in CI.
     p = AnthropicProvider(api_key=None)
-    # Make sure env var doesn't leak in
-    with patch.dict("os.environ", {}, clear=False):
-        p.api_key = None
-        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY is not set"):
-            p.complete(system="x", user="y")
+    p.api_key = None
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY is not set"):
+        p.complete(system="x", user="y")
 
 
 def test_anthropic_http_error_includes_body():
     p = AnthropicProvider(api_key="sk-test")
     fake = _mock_response(401)
-    with patch("infra_x.llm.anthropic.httpx.post", return_value=fake):
-        with pytest.raises(RuntimeError, match="401"):
-            p.complete(system="x", user="y")
+    with (
+        patch("infra_x.llm.anthropic.httpx.post", return_value=fake),
+        pytest.raises(RuntimeError, match="401"),
+    ):
+        p.complete(system="x", user="y")
 
 
 def test_anthropic_extract_first_json_object():
@@ -163,20 +165,22 @@ def test_openai_json_mode_sets_response_format_and_parses():
 
 
 def test_openai_missing_api_key_raises():
+    # Same approach as the Anthropic test: explicitly clear post-init resolution
+    # so the test is hermetic regardless of CI env vars.
     p = OpenAIProvider(api_key=None)
-    p.api_key = None  # belt-and-suspenders for env-var resolution
-    with patch.dict("os.environ", {}, clear=False):
-        p.api_key = None
-        with pytest.raises(RuntimeError, match="OPENAI_API_KEY is not set"):
-            p.complete(system="x", user="y")
+    p.api_key = None
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY is not set"):
+        p.complete(system="x", user="y")
 
 
 def test_openai_http_error_includes_status():
     p = OpenAIProvider(api_key="sk-test")
     fake = _mock_response(429)
-    with patch("infra_x.llm.openai.httpx.post", return_value=fake):
-        with pytest.raises(RuntimeError, match="429"):
-            p.complete(system="x", user="y")
+    with (
+        patch("infra_x.llm.openai.httpx.post", return_value=fake),
+        pytest.raises(RuntimeError, match="429"),
+    ):
+        p.complete(system="x", user="y")
 
 
 def test_openai_handles_empty_choices_gracefully():
